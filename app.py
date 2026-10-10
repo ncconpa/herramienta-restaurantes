@@ -4,8 +4,8 @@ import re
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-# Instalación del navegador en el servidor
-os.system("playwright install chromium")
+
+
 
 # --- 1. FUNCIONES DE LIMPIEZA ---
 def limpiar_reviews_a_numero(rev_str):
@@ -33,7 +33,7 @@ def ejecutar_auditoria(zona, url, scrolls):
     todos_los_datos = []
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        browser = p.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             locale="es-MX"
