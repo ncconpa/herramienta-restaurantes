@@ -1,14 +1,11 @@
 import streamlit as st
 import os
-os.system("playwright install chromium")
-os.system("playwright install-deps")
-import asyncio
-import nest_asyncio
 import re
 import pandas as pd
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 
-nest_asyncio.apply()
+# Instalación del navegador en el servidor
+os.system("playwright install chromium")
 
 # --- 1. FUNCIONES DE LIMPIEZA ---
 def limpiar_reviews_a_numero(rev_str):
@@ -29,32 +26,33 @@ def limpiar_tiempo_a_numero(tiempo_str):
     elif len(numeros) >= 2: return int((int(numeros[0]) + int(numeros[1])) / 2)
     return 0
 
-# --- 2. MOTOR DEL SCRAPER ---
-async def ejecutar_auditoria(zona, url, scrolls):
+# --- 2. MOTOR DEL SCRAPER (VERSIÓN SÍNCRONA ESTABLE) ---
+def ejecutar_auditoria(zona, url, scrolls):
     if not url: return pd.DataFrame()
-
+    
     todos_los_datos = []
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             locale="es-MX"
         )
-        page = await context.new_page()
+        page = context.new_page()
 
         try:
-            await page.goto(url, timeout=90000, wait_until="domcontentloaded")
-            await asyncio.sleep(6)
+            page.goto(url, timeout=90000, wait_until="domcontentloaded")
+            page.wait_for_timeout(6000) # Espera 6 segundos
 
             for i in range(scrolls):
-                await page.keyboard.press("PageDown")
-                await asyncio.sleep(1.2)
-                await page.evaluate("window.scrollBy(0, 1400)")
-                await asyncio.sleep(1.2)
+                page.keyboard.press("PageDown")
+                page.wait_for_timeout(1200)
+                page.evaluate("window.scrollBy(0, 1400)")
+                page.wait_for_timeout(1200)
 
-            bloques = await page.query_selector_all("li, div[data-testid='store-card'], div[role='article']")
+            bloques = page.query_selector_all("li, div[data-testid='store-card'], div[role='article']")
             for b in bloques:
-                texto = await b.inner_text()
+                texto = b.inner_text()
                 if not texto: continue
                 lineas_txt = [l.strip() for l in texto.split("\n") if l.strip()]
                 if not any("min" in l.lower() for l in lineas_txt) or len(lineas_txt) < 3: continue
@@ -87,11 +85,11 @@ async def ejecutar_auditoria(zona, url, scrolls):
                     "Tiempo_Entrega_Min": limpiar_tiempo_a_numero(tiempo_raw)
                 })
         except Exception as e:
-            st.error(f"Error escaneando: {e}")
+            st.error(f"Error escaneando la página: {e}")
         finally:
-            await context.close()
-        await browser.close()
-
+            context.close()
+        browser.close()
+        
     df = pd.DataFrame(todos_los_datos).drop_duplicates(subset=["Zona", "Restaurante"])
     if not df.empty:
         df = df[df["Restaurante"] != "No detectado"]
@@ -107,12 +105,12 @@ st.markdown("Copia y pega la URL de la zona desde Uber Eats para extraer automá
 with st.container():
     zona_nombre = st.text_input("Nombre de la Zona (Ej. Prueba JV)", "")
     zona_url = st.text_input("Enlace (URL) de la plataforma", "")
-
+    
     profundidad = st.selectbox(
         "¿Cuántos restaurantes quieres extraer?",
         ["Rápida (~40-80 tiendas)", "Normal (~80-150 tiendas)", "Profunda (~200-350 tiendas)"]
     )
-
+    
     mapa_scrolls = {"Rápida (~40-80 tiendas)": 8, "Normal (~80-150 tiendas)": 15, "Profunda (~200-350 tiendas)": 28}
     scrolls_seleccionados = mapa_scrolls[profundidad]
 
@@ -123,15 +121,13 @@ if st.button("🚀 Iniciar Extracción", type="primary", use_container_width=Tru
         st.warning("⚠️ Por favor ponle un nombre a la zona.")
     else:
         with st.spinner(f'Navegando en {zona_nombre}... Esto puede tomar 1 o 2 minutos.'):
-            df_resultado = asyncio.run(ejecutar_auditoria(zona_nombre, zona_url, scrolls_seleccionados))
-
+            # Ya no usamos asyncio.run(), simplemente llamamos a la función
+            df_resultado = ejecutar_auditoria(zona_nombre, zona_url, scrolls_seleccionados)
+            
             if not df_resultado.empty:
                 st.success(f"¡Éxito! Se extrajeron {len(df_resultado)} restaurantes en {zona_nombre}.")
-
-                # Mostrar la tabla en la página
                 st.dataframe(df_resultado, use_container_width=True)
-
-                # Botón para descargar
+                
                 csv = df_resultado.to_csv(index=False, encoding="utf-8-sig")
                 st.download_button(
                     label="📥 Descargar Base de Datos (CSV)",
@@ -140,4 +136,4 @@ if st.button("🚀 Iniciar Extracción", type="primary", use_container_width=Tru
                     mime="text/csv"
                 )
             else:
-                st.error("No se pudo extraer la información. Revisa el enlace.")
+                st.error("No se pudo extraer la información. Revisa el enlace o la configuración.")
