@@ -1,13 +1,11 @@
 import streamlit as st
 import os
 import re
+import json
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-
-
-
-# --- 1. FUNCIONES DE LIMPIEZA ---
+# --- 1. FUNCIONES DE LIMPIEZA DE DATOS ---
 def limpiar_reviews_a_numero(rev_str):
     if not rev_str or rev_str == "N/A": return 0
     s = str(rev_str).lower().replace("+", "").replace(",", "").strip()
@@ -26,23 +24,56 @@ def limpiar_tiempo_a_numero(tiempo_str):
     elif len(numeros) >= 2: return int((int(numeros[0]) + int(numeros[1])) / 2)
     return 0
 
-# --- 2. MOTOR DEL SCRAPER (VERSIÓN SÍNCRONA ESTABLE) ---
+# --- 2. MOTOR DEL SCRAPER (CON INTERCEPCIÓN GEOGRÁFICA Y SÍNCRONO) ---
 def ejecutar_auditoria(zona, url, scrolls):
     if not url: return pd.DataFrame()
     
     todos_los_datos = []
+    coordenadas_capturadas = {} # { "Nombre del restaurante": (Lat, Lon) }
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, executable_path="/usr/bin/chromium", args=["--no-sandbox", "--disable-dev-shm-usage"])
+        browser = p.chromium.launch(
+            headless=True, 
+            executable_path="/usr/bin/chromium", 
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             locale="es-MX"
         )
         page = context.new_page()
 
+        # Buscador recursivo en las respuestas JSON de red
+        def buscar_map_markers(obj):
+            if isinstance(obj, dict):
+                if "mapMarker" in obj and isinstance(obj["mapMarker"], dict):
+                    marker = obj["mapMarker"]
+                    titulo = marker.get("description", {}).get("title")
+                    lat = marker.get("latitude")
+                    lon = marker.get("longitude")
+                    if titulo and lat and lon:
+                        coordenadas_capturadas[titulo.strip()] = (lat, lon)
+                for valor in obj.values():
+                    buscar_map_markers(valor)
+            elif isinstance(obj, list):
+                for item in obj:
+                    buscar_map_markers(item)
+
+        # Interceptor de respuestas de red
+        def manejar_respuesta(respuesta):
+            if "graphql" in respuesta.url or "api" in respuesta.url:
+                if respuesta.status == 200:
+                    try:
+                        datos = respuesta.json()
+                        buscar_map_markers(datos)
+                    except:
+                        pass
+
+        page.on("response", manejar_respuesta)
+
         try:
             page.goto(url, timeout=90000, wait_until="domcontentloaded")
-            page.wait_for_timeout(6000) # Espera 6 segundos
+            page.wait_for_timeout(6000)
 
             for i in range(scrolls):
                 page.keyboard.press("PageDown")
@@ -77,12 +108,17 @@ def ejecutar_auditoria(zona, url, scrolls):
                 try: rating_num = float(rating_raw) if rating_raw != "N/A" else 0.0
                 except ValueError: rating_num = 0.0
 
+                # Cruce de latitud y longitud desde la captura de red
+                lat_encontrada, lon_encontrada = coordenadas_capturadas.get(nombre, ("No detectada", "No detectada"))
+
                 todos_los_datos.append({
                     "Zona": zona,
                     "Restaurante": nombre,
                     "Rating": rating_num,
                     "Reviews": limpiar_reviews_a_numero(reviews_raw),
-                    "Tiempo_Entrega_Min": limpiar_tiempo_a_numero(tiempo_raw)
+                    "Tiempo_Entrega_Min": limpiar_tiempo_a_numero(tiempo_raw),
+                    "Latitud": lat_encontrada,
+                    "Longitud": lon_encontrada
                 })
         except Exception as e:
             st.error(f"Error escaneando la página: {e}")
@@ -96,14 +132,14 @@ def ejecutar_auditoria(zona, url, scrolls):
         df = df.sort_values(by=["Zona", "Reviews"], ascending=[True, False]).reset_index(drop=True)
     return df
 
-# --- 3. DISEÑO DE LA PÁGINA WEB ---
+# --- 3. DISEÑO DE LA PÁGINA WEB EN STREAMLIT ---
 st.set_page_config(page_title="Adquisición de Restaurantes", page_icon="🍔", layout="centered")
 
 st.title("🍔 Herramienta de Adquisición")
-st.markdown("Copia y pega la URL de la zona desde Uber Eats para extraer automáticamente la lista de restaurantes.")
+st.markdown("Copia y pega la URL de la zona desde Uber Eats para extraer automáticamente la lista de restaurantes con coordenadas.")
 
 with st.container():
-    zona_nombre = st.text_input("Nombre de la Zona (Ej. Prueba JV)", "")
+    zona_nombre = st.text_input("Nombre de la Zona (Ej. CDMX - San Ángel)", "")
     zona_url = st.text_input("Enlace (URL) de la plataforma", "")
     
     profundidad = st.selectbox(
@@ -121,7 +157,6 @@ if st.button("🚀 Iniciar Extracción", type="primary", use_container_width=Tru
         st.warning("⚠️ Por favor ponle un nombre a la zona.")
     else:
         with st.spinner(f'Navegando en {zona_nombre}... Esto puede tomar 1 o 2 minutos.'):
-            # Ya no usamos asyncio.run(), simplemente llamamos a la función
             df_resultado = ejecutar_auditoria(zona_nombre, zona_url, scrolls_seleccionados)
             
             if not df_resultado.empty:
